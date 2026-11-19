@@ -32,6 +32,7 @@ const props = defineProps({
   selectedId: { type: String, default: null },
   basemap: { type: String, default: 'reference' },
   tiandituKey: { type: String, default: '' },
+  importedBasemap: { type: Object, default: null },
   demo: Boolean,
 })
 const emit = defineEmits(['select', 'basemap-status', 'map-state'])
@@ -56,6 +57,8 @@ let view
 let pendingFit = false
 let stopWatchingTiles
 let satelliteEvents = []
+let importedLayer
+let importedErrorListener
 
 const landStyles = ['#f5f0df', '#efeedc', '#e6ead9', '#dce6d1', '#d1e0c8', '#c6d9bd']
   .map((color, zIndex) => new Style({ fill: new Fill({ color }), zIndex }))
@@ -334,7 +337,15 @@ function fitData() {
   }
 
   pendingFit = false
-  const extent = gridSource.getExtent()
+  fitExtent(gridSource.getExtent(), size)
+}
+
+function fitImported() {
+  const size = map?.getSize()
+  if (size?.[0] && size[1] && importedLayer) fitExtent(importedLayer.extent, size)
+}
+
+function fitExtent(extent, size) {
   if (isEmpty(extent)) return
 
   const [width, height] = size
@@ -359,8 +370,8 @@ function publishMapState() {
 
 function refreshReferenceVisibility() {
   const hasTianditu = basemapStatus.value === 'tianditu'
-  const hasSatellite = basemapStatus.value === 'satellite'
-  const showDemo = !hasTianditu && !hasSatellite && props.demo && referenceStatus.value !== 'error'
+  const hasImagery = basemapStatus.value === 'satellite' || basemapStatus.value === 'imported'
+  const showDemo = !hasTianditu && !hasImagery && props.demo && referenceStatus.value !== 'error'
   referenceGeometry.setVisible(showDemo)
   referenceLabels.setVisible(showDemo)
   graticule.setVisible(!hasTianditu && !(showDemo && referenceStatus.value === 'ready'))
@@ -421,12 +432,42 @@ function useSatellite() {
   return !isEmpty(gridExtent) && containsExtent(satelliteExtent, gridExtent)
 }
 
+function removeImportedLayer() {
+  if (!importedLayer) return
+  unByKey(importedErrorListener)
+  map.removeLayer(importedLayer.layer)
+  importedLayer.dispose()
+  importedLayer = null
+}
+
+function syncImportedLayer() {
+  const incoming = props.importedBasemap
+  if (incoming === importedLayer) return
+  removeImportedLayer()
+  if (!incoming) return
+
+  importedLayer = incoming
+  const layers = map.getLayers()
+  layers.insertAt(layers.getArray().indexOf(gridLayer), incoming.layer)
+  importedErrorListener = incoming.layer.getSource().on(incoming.errorEvent, () => {
+    if (!incoming.layer.getVisible()) return
+    incoming.layer.setVisible(false)
+    setBasemapStatus('imported-error')
+  })
+}
+
 function updateBasemap() {
   const useImage = useSatellite()
   if (useImage && satelliteLayer.getVisible()) return
 
+  importedLayer?.layer.setVisible(false)
   removeTianditu()
   removeSatellite()
+  if (props.basemap === 'imported' && importedLayer) {
+    importedLayer.layer.setVisible(true)
+    setBasemapStatus('imported')
+    return
+  }
   if (useImage) {
     showSatellite()
     return
@@ -525,6 +566,7 @@ onMounted(() => {
     map.getViewport().classList.toggle('is-over-cell', overCell)
   })
   replaceCells(props.geojson)
+  syncImportedLayer()
   updateBasemap()
   publishMapState()
 })
@@ -533,6 +575,7 @@ onBeforeUnmount(() => {
   unByKey(referenceEvents)
   removeTianditu()
   removeSatellite()
+  removeImportedLayer()
   map?.dispose()
 })
 
@@ -543,19 +586,23 @@ watch(() => props.geojson, (geojson) => {
 watch(() => props.categoryKeys, refreshFilter, { deep: true })
 watch(() => props.selectedId, refreshSelection)
 watch(() => props.demo, refreshReferenceVisibility)
-watch([() => props.basemap, () => props.tiandituKey], updateBasemap)
+watch([() => props.basemap, () => props.tiandituKey, () => props.importedBasemap], () => {
+  syncImportedLayer()
+  updateBasemap()
+})
 
 defineExpose({
   zoomIn: () => zoomBy(1),
   zoomOut: () => zoomBy(-1),
   fitData,
+  fitImported,
 })
 </script>
 
 <template>
   <div
     class="grid-map"
-    :class="{ 'grid-map--reference': demo && basemapStatus !== 'tianditu' && basemapStatus !== 'satellite' && referenceStatus === 'ready' }"
+    :class="{ 'grid-map--reference': demo && ['reference', 'loading', 'error', 'satellite-error', 'imported-error'].includes(basemapStatus) && referenceStatus === 'ready' }"
   >
     <div
       ref="target"
@@ -575,6 +622,9 @@ defineExpose({
         <a :href="satelliteSourcesUrl" target="_blank" rel="noopener noreferrer">Sentinel‑2 真彩色 · 2025.10.16–24</a>
         <span class="grid-map__source">Contains modified Copernicus Sentinel data 2025</span>
       </template>
+      <span v-else-if="basemapStatus === 'imported'" class="grid-map__imported-name" :title="importedBasemap?.name">
+        {{ importedBasemap?.name }}
+      </span>
       <a
         v-else-if="demo && referenceStatus === 'ready'"
         :href="referenceSourcesUrl"
@@ -657,6 +707,13 @@ defineExpose({
 
 .grid-map__source {
   display: block;
+}
+
+.grid-map__imported-name {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .grid-map__credit a {

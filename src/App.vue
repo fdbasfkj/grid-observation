@@ -5,13 +5,15 @@ import {
   Crosshair, Eye, Focus, Layers2, Layers3, LoaderCircle, Map as MapIcon, MapPin,
   Minus, Plus, TriangleAlert, X,
 } from '@lucide/vue'
+import BasemapImport from './components/BasemapImport.vue'
 import GridMap from './components/GridMap.vue'
 import { getCatalog, getMonthGeoJSON } from './api.js'
 import { categories, categoryFor, formatCoordinates, monthLabel, number } from './grid.js'
 
 const tiandituKey = (import.meta.env.VITE_TDT_KEY || '').trim()
-const basemapLabels = { reference: '参考底图', satellite: '卫星影像', tianditu: '天地图', loading: '加载底图' }
-const basemapErrors = { error: '天地图', 'satellite-error': '卫星影像' }
+const defaultBasemap = tiandituKey ? 'tianditu' : 'auto'
+const basemapLabels = { reference: '参考底图', satellite: '卫星影像', tianditu: '天地图', imported: '自定义底图', loading: '加载底图' }
+const basemapErrors = { error: '天地图', 'satellite-error': '卫星影像', 'imported-error': '自定义底图' }
 const catalog = shallowRef(null)
 const geojson = shallowRef(null)
 const activeMonth = ref('')
@@ -19,7 +21,9 @@ const catalogLoading = ref(true)
 const catalogError = ref(false)
 const monthLoading = ref(false)
 const monthError = ref(false)
-const basemap = ref(tiandituKey ? 'tianditu' : 'auto')
+const basemap = ref(defaultBasemap)
+const importedBasemap = shallowRef(null)
+const importedBasemapSaved = ref(true)
 const mapStatus = ref('reference')
 const mapState = shallowRef(null)
 const enabledCategories = ref(categories.map(({ key }) => key))
@@ -27,6 +31,7 @@ const picked = shallowRef(null)
 const map = ref(null)
 const monthMenu = ref(null)
 const basemapMenu = ref(null)
+const basemapImport = ref(null)
 const guide = ref(null)
 const detailCard = ref(null)
 let catalogRequest
@@ -140,16 +145,40 @@ function showAllCategories() {
   enabledCategories.value = categories.map(({ key }) => key)
 }
 
-async function chooseBasemap(value) {
+function closeBasemapMenu() {
   if (basemapMenu.value?.open) {
     basemapMenu.value.open = false
     basemapMenu.value.querySelector('summary')?.focus()
   }
+}
+
+async function chooseBasemap(value) {
+  closeBasemapMenu()
   if (basemap.value === value && failedBasemap.value) {
     basemap.value = 'reference'
     await nextTick()
   }
   basemap.value = value
+  if (value === 'imported') {
+    await nextTick()
+    map.value?.fitImported()
+  }
+}
+
+function openBasemapImport() {
+  closeBasemapMenu()
+  basemapImport.value?.open()
+}
+
+function loadImportedBasemap({ basemap: imported, activate, saved }) {
+  importedBasemap.value = imported
+  importedBasemapSaved.value = saved
+  if (activate) void chooseBasemap('imported')
+}
+
+function clearImportedBasemap() {
+  importedBasemap.value = null
+  if (basemap.value === 'imported') basemap.value = defaultBasemap
 }
 
 function closeMenus(event) {
@@ -326,7 +355,8 @@ onBeforeUnmount(() => {
       <section class="map-card" aria-label="月度格网地图" :aria-busy="catalogLoading || monthLoading">
         <div class="map-stage">
           <GridMap ref="map" :geojson="geojson" :category-keys="enabledCategories"
-            :selected-id="picked?.id ?? null" :basemap="basemap" :tianditu-key="tiandituKey" :demo="isDemo"
+            :selected-id="picked?.id ?? null" :basemap="basemap" :tianditu-key="tiandituKey"
+            :imported-basemap="importedBasemap" :demo="isDemo"
             @select="picked = $event" @basemap-status="mapStatus = $event" @map-state="mapState = $event" />
 
           <div v-if="activeMonth" class="map-ribbon">
@@ -345,6 +375,9 @@ onBeforeUnmount(() => {
               <button type="button" :aria-pressed="mapStatus === 'reference' || !!failedBasemap" @click="chooseBasemap('reference')">参考底图</button>
               <button type="button" :disabled="!tiandituKey" :aria-pressed="basemap === 'tianditu' && mapStatus !== 'error'"
                 @click="chooseBasemap('tianditu')">天地图 <span v-if="!tiandituKey" class="menu-hint">待配置</span></button>
+              <button v-if="importedBasemap" type="button" :aria-pressed="mapStatus === 'imported'" :title="importedBasemap.name"
+                @click="chooseBasemap('imported')">自定义底图</button>
+              <button class="basemap-menu__import" type="button" @click="openBasemapImport">导入底图</button>
             </div>
           </details>
 
@@ -369,6 +402,7 @@ onBeforeUnmount(() => {
             <template v-else><MapIcon aria-hidden="true" :size="20" /> <span>暂无发布的月度地图</span></template>
           </div>
           <p v-if="failedBasemap" class="basemap-notice" role="status">{{ failedBasemap }}加载失败，已切换到参考底图。</p>
+          <p v-else-if="mapStatus === 'imported' && !importedBasemapSaved" class="basemap-notice" role="status">底图已导入，本次访问可用。</p>
 
           <button v-if="picked" class="feature-peek" type="button" @click="inspectOnMobile">
             <MapPin aria-hidden="true" :size="15" /> 查看格网属性 <ChevronRight aria-hidden="true" :size="15" />
@@ -385,6 +419,8 @@ onBeforeUnmount(() => {
       </section>
     </div>
   </main>
+
+  <BasemapImport ref="basemapImport" :current-name="importedBasemap?.name" @loaded="loadImportedBasemap" @removed="clearImportedBasemap" />
 
   <dialog ref="guide" class="guide-dialog" aria-labelledby="guide-title">
     <div class="dialog-title">

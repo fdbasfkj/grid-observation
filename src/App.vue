@@ -10,6 +10,8 @@ import { getCatalog, getMonthGeoJSON } from './api.js'
 import { categories, categoryFor, formatCoordinates, monthLabel, number } from './grid.js'
 
 const tiandituKey = (import.meta.env.VITE_TDT_KEY || '').trim()
+const basemapLabels = { reference: '参考底图', satellite: '卫星影像', tianditu: '天地图', loading: '加载底图' }
+const basemapErrors = { error: '天地图', 'satellite-error': '卫星影像' }
 const catalog = shallowRef(null)
 const geojson = shallowRef(null)
 const activeMonth = ref('')
@@ -17,7 +19,7 @@ const catalogLoading = ref(true)
 const catalogError = ref(false)
 const monthLoading = ref(false)
 const monthError = ref(false)
-const basemap = ref(tiandituKey ? 'tianditu' : 'reference')
+const basemap = ref(tiandituKey ? 'tianditu' : 'auto')
 const mapStatus = ref('reference')
 const mapState = shallowRef(null)
 const enabledCategories = ref(categories.map(({ key }) => key))
@@ -32,6 +34,7 @@ let monthRequest
 
 const months = computed(() => catalog.value?.months ?? [])
 const isDemo = computed(() => catalog.value?.demo === true)
+const failedBasemap = computed(() => basemapErrors[mapStatus.value] ?? '')
 const activeIndex = computed(() => months.value.findIndex(({ month }) => month === activeMonth.value))
 const featureCount = computed(() => geojson.value?.features.length ?? 0)
 const legend = computed(() => {
@@ -142,7 +145,7 @@ async function chooseBasemap(value) {
     basemapMenu.value.open = false
     basemapMenu.value.querySelector('summary')?.focus()
   }
-  if (value === 'tianditu' && basemap.value === value && mapStatus.value === 'error') {
+  if (basemap.value === value && failedBasemap.value) {
     basemap.value = 'reference'
     await nextTick()
   }
@@ -334,11 +337,12 @@ onBeforeUnmount(() => {
           <details ref="basemapMenu" class="basemap-menu">
             <summary class="basemap-menu__trigger" title="切换底图">
               <MapIcon aria-hidden="true" :size="16" />
-              {{ mapStatus === 'tianditu' ? '天地图' : mapStatus === 'loading' ? '加载底图' : '参考底图' }}
+              {{ basemapLabels[mapStatus] ?? basemapLabels.reference }}
               <ChevronDown aria-hidden="true" :size="14" class="down-icon" />
             </summary>
             <div class="menu-surface basemap-menu__items">
-              <button type="button" :aria-pressed="basemap === 'reference' || mapStatus === 'error'" @click="chooseBasemap('reference')">参考底图</button>
+              <button type="button" :aria-pressed="mapStatus === 'satellite'" @click="chooseBasemap('satellite')">卫星影像</button>
+              <button type="button" :aria-pressed="mapStatus === 'reference' || !!failedBasemap" @click="chooseBasemap('reference')">参考底图</button>
               <button type="button" :disabled="!tiandituKey" :aria-pressed="basemap === 'tianditu' && mapStatus !== 'error'"
                 @click="chooseBasemap('tianditu')">天地图 <span v-if="!tiandituKey" class="menu-hint">待配置</span></button>
             </div>
@@ -364,7 +368,7 @@ onBeforeUnmount(() => {
             </template>
             <template v-else><MapIcon aria-hidden="true" :size="20" /> <span>暂无发布的月度地图</span></template>
           </div>
-          <p v-if="mapStatus === 'error'" class="basemap-notice" role="status">天地图加载失败，已切换到参考底图。</p>
+          <p v-if="failedBasemap" class="basemap-notice" role="status">{{ failedBasemap }}加载失败，已切换到参考底图。</p>
 
           <button v-if="picked" class="feature-peek" type="button" @click="inspectOnMobile">
             <MapPin aria-hidden="true" :size="15" /> 查看格网属性 <ChevronRight aria-hidden="true" :size="15" />

@@ -6,13 +6,15 @@ import { unByKey } from 'ol/Observable.js'
 import View from 'ol/View.js'
 import { asArray } from 'ol/color.js'
 import ScaleLine from 'ol/control/ScaleLine.js'
-import { isEmpty } from 'ol/extent.js'
+import { containsExtent, isEmpty } from 'ol/extent.js'
 import GeoJSON from 'ol/format/GeoJSON.js'
 import { defaults as defaultInteractions } from 'ol/interaction/defaults.js'
 import Graticule from 'ol/layer/Graticule.js'
+import ImageLayer from 'ol/layer/Image.js'
 import TileLayer from 'ol/layer/Tile.js'
 import VectorLayer from 'ol/layer/Vector.js'
 import { get as getProjection } from 'ol/proj.js'
+import ImageStatic from 'ol/source/ImageStatic.js'
 import VectorSource from 'ol/source/Vector.js'
 import XYZ from 'ol/source/XYZ.js'
 import Circle from 'ol/style/Circle.js'
@@ -45,11 +47,15 @@ const tiandituGrid = createXYZ({ extent: mapProjection.getExtent(), minZoom: 1, 
 const demoCenter = [103.65, 30.21]
 const mapFont = '"Noto Sans SC", "Microsoft YaHei", "PingFang SC", sans-serif'
 const referenceSourcesUrl = `${import.meta.env.BASE_URL}demo/SOURCES.md`
+const satelliteExtent = [85.25, 44.72, 91.38, 49.42]
+const satelliteUrl = `${import.meta.env.BASE_URL}imagery/altay-sentinel-2-2025-10.webp`
+const satelliteSourcesUrl = `${import.meta.env.BASE_URL}imagery/SOURCES.md`
 
 let map
 let view
 let pendingFit = false
 let stopWatchingTiles
+let satelliteEvents = []
 
 const landStyles = ['#f5f0df', '#efeedc', '#e6ead9', '#dce6d1', '#d1e0c8', '#c6d9bd']
   .map((color, zIndex) => new Style({ fill: new Fill({ color }), zIndex }))
@@ -188,6 +194,7 @@ const referenceLabels = new VectorLayer({
 })
 const tiandituBase = new TileLayer({ visible: false })
 const tiandituLabels = new TileLayer({ visible: false })
+const satelliteLayer = new ImageLayer({ visible: false })
 
 const gridSource = new VectorSource({ wrapX: false })
 const selectedSource = new VectorSource({ wrapX: false })
@@ -352,7 +359,8 @@ function publishMapState() {
 
 function refreshReferenceVisibility() {
   const hasTianditu = basemapStatus.value === 'tianditu'
-  const showDemo = !hasTianditu && props.demo && referenceStatus.value !== 'error'
+  const hasSatellite = basemapStatus.value === 'satellite'
+  const showDemo = !hasTianditu && !hasSatellite && props.demo && referenceStatus.value !== 'error'
   referenceGeometry.setVisible(showDemo)
   referenceLabels.setVisible(showDemo)
   graticule.setVisible(!hasTianditu && !(showDemo && referenceStatus.value === 'ready'))
@@ -384,8 +392,45 @@ function tiandituSource(layer, key) {
   })
 }
 
+function removeSatellite() {
+  unByKey(satelliteEvents)
+  satelliteEvents = []
+  satelliteLayer.setVisible(false)
+  satelliteLayer.setSource(null)
+}
+
+function showSatellite() {
+  const source = new ImageStatic({ url: satelliteUrl, imageExtent: satelliteExtent, projection: mapProjection })
+  satelliteEvents = [
+    source.on('imageloadstart', () => setBasemapStatus('loading')),
+    source.on('imageloadend', () => setBasemapStatus('satellite')),
+    source.on('imageloaderror', () => {
+      removeSatellite()
+      setBasemapStatus('satellite-error')
+    }),
+  ]
+  satelliteLayer.setSource(source)
+  satelliteLayer.setVisible(true)
+  setBasemapStatus('satellite')
+}
+
+function useSatellite() {
+  if (props.basemap === 'satellite') return true
+  if (props.basemap !== 'auto' || props.demo) return false
+  const gridExtent = gridSource.getExtent()
+  return !isEmpty(gridExtent) && containsExtent(satelliteExtent, gridExtent)
+}
+
 function updateBasemap() {
+  const useImage = useSatellite()
+  if (useImage && satelliteLayer.getVisible()) return
+
   removeTianditu()
+  removeSatellite()
+  if (useImage) {
+    showSatellite()
+    return
+  }
   if (props.basemap !== 'tianditu') {
     setBasemapStatus('reference')
     return
@@ -465,7 +510,7 @@ onMounted(() => {
     interactions: defaultInteractions({ altShiftDragRotate: false, pinchRotate: false }),
     controls: [new ScaleLine({ units: 'metric', minWidth: 58 })],
     layers: [
-      graticule, referenceGeometry, tiandituBase,
+      graticule, referenceGeometry, satelliteLayer, tiandituBase,
       gridLayer, referenceLabels, tiandituLabels, selectedLayer,
     ],
   })
@@ -487,10 +532,14 @@ onMounted(() => {
 onBeforeUnmount(() => {
   unByKey(referenceEvents)
   removeTianditu()
+  removeSatellite()
   map?.dispose()
 })
 
-watch(() => props.geojson, replaceCells, { flush: 'post' })
+watch(() => props.geojson, (geojson) => {
+  replaceCells(geojson)
+  if (geojson && props.basemap === 'auto') updateBasemap()
+}, { flush: 'post' })
 watch(() => props.categoryKeys, refreshFilter, { deep: true })
 watch(() => props.selectedId, refreshSelection)
 watch(() => props.demo, refreshReferenceVisibility)
@@ -506,7 +555,7 @@ defineExpose({
 <template>
   <div
     class="grid-map"
-    :class="{ 'grid-map--reference': demo && basemapStatus !== 'tianditu' && referenceStatus === 'ready' }"
+    :class="{ 'grid-map--reference': demo && basemapStatus !== 'tianditu' && basemapStatus !== 'satellite' && referenceStatus === 'ready' }"
   >
     <div
       ref="target"
@@ -522,6 +571,10 @@ defineExpose({
         target="_blank"
         rel="noopener noreferrer"
       >底图 © 天地图 · EPSG:4326</a>
+      <template v-else-if="basemapStatus === 'satellite'">
+        <a :href="satelliteSourcesUrl" target="_blank" rel="noopener noreferrer">Sentinel‑2 真彩色 · 2025.10.16–24</a>
+        <span class="grid-map__source">Contains modified Copernicus Sentinel data 2025</span>
+      </template>
       <a
         v-else-if="demo && referenceStatus === 'ready'"
         :href="referenceSourcesUrl"
@@ -595,10 +648,15 @@ defineExpose({
   z-index: 2;
   right: 12px;
   bottom: 10px;
+  max-width: calc(100% - 100px);
   padding: 2px 6px;
   color: #4c665a;
   font-size: 10px;
   line-height: 1.5;
+}
+
+.grid-map__source {
+  display: block;
 }
 
 .grid-map__credit a {
